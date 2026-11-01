@@ -120,6 +120,9 @@ class JITContext::Compiler {
   std::vector<const asmjit::Label *> jumpTableLabels_{};
   llvh::SmallVector<const asmjit::Label *, 4> exceptionHandlers_{};
 
+  /// [mcarcade patch] 当前正在编译的指令名，失败时用于精确定位。
+  const char *curOpcodeName_ = "(none)";
+
  public:
   Compiler(Runtime &runtime, JITContext &jc, CodeBlock *codeBlock)
       : jc_(jc),
@@ -171,10 +174,11 @@ class JITContext::Compiler {
   /// \return the instruction pointer for the next instruction.
   JIT_INLINE const inst::Inst *dispatch(const inst::Inst *ip) {
     switch (ip->opCode) {
-#define DEFINE_OPCODE(name)   \
-  case inst::OpCode::name:    \
-    emit##name(&ip->i##name); \
-    ip = NEXTINST(name);      \
+#define DEFINE_OPCODE(name)    \
+  case inst::OpCode::name:     \
+    curOpcodeName_ = #name;    \
+    emit##name(&ip->i##name);  \
+    ip = NEXTINST(name);       \
     break;
 #include "hermes/BCGen/HBC/BytecodeList.def"
 
@@ -306,7 +310,9 @@ JITCompiledFunctionPtr JITContext::Compiler::compileCodeBlock() {
       if (error_ == Error::UnsupportedInst)
         g_hermes_jit_failed_unsupported++;
       snprintf(g_hermes_jit_last_error, sizeof(g_hermes_jit_last_error),
-               "%s (%s)", errMsg, codeBlock_->getNameString().c_str());
+               "op=%s err=%d %s (%s)", curOpcodeName_, (int)error_,
+               otherErrorMessage_.c_str(),
+               codeBlock_->getNameString().c_str());
       llvh::errs() << "jit fail: " << g_hermes_jit_last_error << "\n";
     }
 
