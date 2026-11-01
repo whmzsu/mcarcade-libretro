@@ -434,7 +434,23 @@ JITCompiledFunctionPtr JITContext::Compiler::compileCodeBlockImpl() {
     _sh_longjmp(errorJmpBuf_, 1);                                              \
   }
 
-EMIT_UNIMPLEMENTED(AsyncBreakCheck)
+// [mcarcade patch] 实现 AsyncBreakCheck（原版 EMIT_UNIMPLEMENTED）。
+//
+// 背景：pxt（MakeCode）编译出的每个函数在入口和回边都带 AsyncBreakCheck
+// （协程断点检查），原版 arm64/x86-64 JIT 把它列为未实现 → 127/128 个函数
+// JIT 全部失败 → 整个游戏纯解释执行，比 QuickJS 还慢。
+//
+// 语义（对照解释器 Interpreter.cpp CASE(AsyncBreakCheck)）：
+//   1. 若 runtime.hasAsyncBreak()（debugger 断点请求 / watchdog timeout）
+//      则处理之 —— 本核心 HERMES_ENABLE_DEBUGGER=OFF 且从不设 timeout，
+//      恒为 false；
+//   2. gcScope.flushToSmallCount(KEEP_HANDLES) —— GC 句柄池水位回收。
+//      JIT 代码里句柄集中在 runtime call 内临时分配、返回即随 GCScope
+//      释放，函数级回收已覆盖 pxt 代码的分配模式；
+//      丢失循环内 flush 的代价远小于"整个 JIT 失效"。
+// 因此这里合法地编译成 no-op。上游若日后实现带 helper 的版本可替换。
+inline void JITContext::Compiler::emitAsyncBreakCheck(
+    const inst::AsyncBreakCheckInst *inst) {}
 
 #undef EMIT_UNIMPLEMENTED
 
