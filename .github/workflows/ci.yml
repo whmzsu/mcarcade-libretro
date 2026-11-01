@@ -119,6 +119,17 @@ jobs:
       - name: 冒烟自检（ping.js / ping.png 全链路）
         run: bash scripts/ci-smoke.sh ./build/core_test
 
+      - name: ARM64 基准（JIT on/off 同机对比）
+        run: |
+          echo "===== JIT ON（默认） ====="
+          ARCADE_PERF=1 ./build/core_test tests/data/sample_arcade.png /tmp/on.ppm 300 --cache=/tmp/bcon 2>&1 \
+            | grep -E "JIT\[|jit:|perf:" || true
+          echo "===== JIT OFF（ARCADE_NO_JIT=1，纯解释器） ====="
+          ARCADE_NO_JIT=1 ARCADE_PERF=1 ./build/core_test tests/data/sample_arcade.png /tmp/off.ppm 300 --cache=/tmp/bcoff 2>&1 \
+            | grep -E "JIT\[|jit:|perf:" || true
+          echo "结论：对比两段 perf: step 数值。JIT ON 应明显低于 OFF；"
+          echo "若 ON ≈ OFF，说明 JIT 没生效（阈值/内存上限/编译失败）。"
+
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:

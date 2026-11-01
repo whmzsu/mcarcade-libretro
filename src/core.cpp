@@ -74,6 +74,10 @@ static const char *cache_dir_public(void);
  */
 #if CORE_JIT_PLATFORM
 extern "C" int g_hermes_jit_alloc_failed;
+extern "C" unsigned long long g_hermes_jit_compiled;
+extern "C" unsigned long long g_hermes_jit_failed;
+extern "C" unsigned long long g_hermes_jit_compile_us;
+extern "C" unsigned long long g_hermes_jit_code_bytes;
 #endif
 
 using namespace std::string_literals;
@@ -91,6 +95,8 @@ static retro_input_state_t input_state_cb;
 static bool g_bitmask_supported = false;
 static bool g_ab_swap = false;
 static bool g_compile_cache = true;
+static bool g_jit_on = true;      /* 菜单选项：Hermes JIT 开关 */
+static int g_diag_on = 0;         /* 菜单选项：屏幕诊断叠加层 */
 static unsigned g_port_device = RETRO_DEVICE_JOYPAD;
 static int g_select_state = 0;
 static int g_pending_reset = 0;
@@ -152,6 +158,13 @@ static void perf_flush(void)
     g_blit_ok = g_blit_fb = 0;
     g_blit_ms = 0;
     g_perf_frames = 0;
+#if CORE_JIT_PLATFORM
+    /* 每 2 秒把 JIT 真实计数写一行日志，便于离线判断 JIT 是否在干活 */
+    if (g_hermes_jit_compiled || g_hermes_jit_failed)
+        arc_log("jit: compiled %llu failed %llu compile %.0fms code %lluKB",
+                g_hermes_jit_compiled, g_hermes_jit_failed,
+                g_hermes_jit_compile_us / 1000.0, g_hermes_jit_code_bytes / 1024);
+#endif
 }
 
 /* ---------------- 状态 ---------------- */
@@ -411,9 +424,11 @@ static int js_init(void)
                                     .build();
     ::hermes::vm::RuntimeConfig::Builder cfg;
     cfg.withGCConfig(gc);
+    /* 是否启用 JIT：菜单选项优先，ARCADE_NO_JIT 环境变量可强制关（A/B 用）。 */
     const char *nojit = getenv("ARCADE_NO_JIT");
-    if (!nojit || !nojit[0])
-        cfg.withEnableJIT(true);
+    bool want_jit = g_jit_on && (!nojit || !nojit[0]);
+    cfg.withEnableJIT(want_jit);
+    arc_log("JIT 请求: %s", want_jit ? "开" : "关");
     g_rt = facebook::hermes::makeHermesRuntime(cfg.build());
     if (!g_rt)
         return 0;
@@ -556,6 +571,10 @@ EXPORT void retro_set_environment(retro_environment_t cb)
           "Compile Cache (png carts, ~5s saved); enabled|disabled" },
         { "makecode_arcade_bytecode_cache",
           "Bytecode Cache (Hermes AOT, faster load); enabled|disabled" },
+        { "makecode_arcade_jit",
+          "Hermes JIT (ARM: on = machine code, off = interpreter); enabled|disabled" },
+        { "makecode_arcade_diag",
+          "On-screen Diagnostics (JIT state, step ms, fps); disabled|enabled" },
         { "makecode_arcade_perf",
           "Performance Stats (log every 2s); disabled|enabled" },
         { NULL, NULL }
@@ -577,6 +596,8 @@ static void read_options(void)
     g_ab_swap = false;
     g_compile_cache = true;
     g_bytecode_cache = true;
+    g_jit_on = true;
+    g_diag_on = 0;
     if (!environ_cb)
         return;
     v.key = "makecode_arcade_ab_swap";
@@ -591,6 +612,14 @@ static void read_options(void)
     v.value = NULL;
     if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &v) && v.value)
         g_bytecode_cache = (strcmp(v.value, "enabled") == 0);
+    v.key = "makecode_arcade_jit";
+    v.value = NULL;
+    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &v) && v.value)
+        g_jit_on = (strcmp(v.value, "enabled") == 0);
+    v.key = "makecode_arcade_diag";
+    v.value = NULL;
+    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &v) && v.value)
+        g_diag_on = (strcmp(v.value, "enabled") == 0);
     v.key = "makecode_arcade_perf";
     v.value = NULL;
     if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &v) && v.value)
@@ -667,7 +696,7 @@ EXPORT void retro_get_system_info(struct retro_system_info *info)
 {
     memset(info, 0, sizeof(*info));
     info->library_name = "MakeCode Arcade JIT (Hermes)";
-    info->library_version = "1.0.0";
+    info->library_version = "1.1.0";
     info->valid_extensions = "js|png";
     info->need_fullpath = false;
     info->block_extract = true;
@@ -724,37 +753,54 @@ static void compile_log(const char *msg, void *ud)
 }
 
 /*
- * JIT 状态自检：定义一个热函数并调 40 次（exec 阈值默认 32），触发真实
- * 的 JIT 编译路径，然后读分配失败标志。日志能区分三种状态：
- *   - 平台编译期没开 JIT（Windows）
- *   - 开了但运行时分配失败 → 已自动回退解释器（W^X / 内存限制）
- *   - 真正 active
- * 设备上排查"慢"问题时，这一行日志是关键证据。
+ * JIT 状态报告。只信真实计数：Hermes 的 isEnabled() 在“开启了但一个函数
+ * 都没编译成功”时同样是 true，光看它会把纯解释执行误判成 JIT 生效。
  */
+static void jit_report(const char *tag)
+{
+#if CORE_JIT_PLATFORM
+    if (g_hermes_jit_alloc_failed)
+        arc_log("JIT[%s]: 可执行内存分配失败 → 解释器（疑被 W^X 拦截）", tag);
+    else if (!g_jit_on)
+        arc_log("JIT[%s]: 按选项关闭 → 解释器", tag);
+    else if (g_hermes_jit_compiled == 0)
+        arc_log("JIT[%s]: 已开启但未编译任何函数（纯解释，失败 %llu）",
+                tag, g_hermes_jit_failed);
+    else
+        arc_log("JIT[%s]: 已编译 %llu 个函数，失败 %llu，编译共 %.0fms，代码 %lluKB",
+                tag, g_hermes_jit_compiled, g_hermes_jit_failed,
+                g_hermes_jit_compile_us / 1000.0, g_hermes_jit_code_bytes / 1024);
+#else
+    (void)tag;
+    arc_log("JIT[%s]: 平台编译期未启用（AOT 字节码 + 解释器）", tag);
+#endif
+}
+
+/* 启动时跑一个热函数，把 JIT 编译路径真正走一遍，然后报告。 */
 static void js_jit_selftest(void)
 {
 #if CORE_JIT_PLATFORM
     if (!g_rt) return;
     jsi::Runtime &rt = *g_rt;
+    unsigned long long c0 = g_hermes_jit_compiled;
+    unsigned long long us0 = g_hermes_jit_compile_us;
     double t0 = now_ms();
     try {
         rt.evaluateJavaScript(std::unique_ptr<jsi::Buffer>(buffer_from_string(
             "var __jt=0;"
             "function __jf(){var s=0;for(var i=0;i<20000;i++)s+=i*3;return s;}"
-            "for(var k=0;k<40;k++)__jt=__jf();__jt;")),
+            "for(var k=0;k<64;k++)__jt=__jf();__jt;")),
             "jit_selftest.js");
     } catch (const jsi::JSError &e) {
         arc_log("JIT 自检 JS 异常: %s", e.getMessage().c_str());
         return;
     }
-    if (g_hermes_jit_alloc_failed)
-        arc_log("JIT: 可执行内存分配失败，已自动回退解释器"
-                "（可能被系统 W^X 策略拦截）");
-    else
-        arc_log("JIT: active（热函数已编译为本机代码，自检 %.0f ms）",
-                now_ms() - t0);
+    arc_log("JIT 自检: 编译 %llu 个函数，耗时 %.2fms（墙钟 %.0fms）",
+            g_hermes_jit_compiled - c0,
+            (g_hermes_jit_compile_us - us0) / 1000.0, now_ms() - t0);
+    jit_report("启动");
 #else
-    arc_log("JIT: 此平台编译期未启用（AOT 字节码 + 解释器）");
+    jit_report("启动");
 #endif
 }
 
@@ -993,6 +1039,146 @@ static int typed_bytes_of(jsi::Runtime &rt, const jsi::Value &v,
     return 0;
 }
 
+/* ---------------- 屏幕诊断层（不需要看日志） ---------------- */
+
+/*
+ * 5x7 点阵字体，每个字符 5 字节、每字节一列，bit0 是顶行。
+ * 只覆盖诊断文字用到的 ASCII 范围 32..90；未定义字符渲染成空白。
+ * 160x120 的画面放大到全屏后这层字仍然清晰可读。
+ */
+static const unsigned char font5x7[59][5] = {
+    {0x00,0x00,0x00,0x00,0x00}, /* ' ' */
+    {0x00,0x00,0x5F,0x00,0x00}, /* '!' */
+    {0x00,0x07,0x00,0x07,0x00}, /* '"' */
+    {0x14,0x7F,0x14,0x7F,0x14}, /* '#' */
+    {0x24,0x2A,0x7F,0x2A,0x12}, /* '$' */
+    {0x23,0x13,0x08,0x64,0x62}, /* '%' */
+    {0x36,0x49,0x55,0x22,0x50}, /* '&' */
+    {0x00,0x05,0x03,0x00,0x00}, /* '\'' */
+    {0x00,0x1C,0x22,0x41,0x00}, /* '(' */
+    {0x00,0x41,0x22,0x1C,0x00}, /* ')' */
+    {0x08,0x2A,0x1C,0x2A,0x08}, /* '*' */
+    {0x08,0x08,0x3E,0x08,0x08}, /* '+' */
+    {0x00,0x50,0x30,0x00,0x00}, /* ',' */
+    {0x08,0x08,0x08,0x08,0x08}, /* '-' */
+    {0x00,0x60,0x60,0x00,0x00}, /* '.' */
+    {0x20,0x10,0x08,0x04,0x02}, /* '/' */
+    {0x3E,0x51,0x49,0x45,0x3E}, /* '0' */
+    {0x00,0x42,0x7F,0x40,0x00}, /* '1' */
+    {0x42,0x61,0x51,0x49,0x46}, /* '2' */
+    {0x21,0x41,0x45,0x4B,0x31}, /* '3' */
+    {0x18,0x14,0x12,0x7F,0x10}, /* '4' */
+    {0x27,0x45,0x45,0x45,0x39}, /* '5' */
+    {0x3C,0x4A,0x49,0x49,0x30}, /* '6' */
+    {0x01,0x71,0x09,0x05,0x03}, /* '7' */
+    {0x36,0x49,0x49,0x49,0x36}, /* '8' */
+    {0x06,0x49,0x49,0x29,0x1E}, /* '9' */
+    {0x00,0x36,0x36,0x00,0x00}, /* ':' */
+    {0x00,0x56,0x36,0x00,0x00}, /* ';' */
+    {0x08,0x14,0x22,0x41,0x00}, /* '<' */
+    {0x14,0x14,0x14,0x14,0x14}, /* '=' */
+    {0x00,0x41,0x22,0x14,0x08}, /* '>' */
+    {0x02,0x01,0x51,0x09,0x06}, /* '?' */
+    {0x32,0x49,0x79,0x41,0x3E}, /* '@' */
+    {0x7E,0x11,0x11,0x11,0x7E}, /* 'A' */
+    {0x7F,0x49,0x49,0x49,0x36}, /* 'B' */
+    {0x3E,0x41,0x41,0x41,0x22}, /* 'C' */
+    {0x7F,0x41,0x41,0x22,0x1C}, /* 'D' */
+    {0x7F,0x49,0x49,0x49,0x41}, /* 'E' */
+    {0x7F,0x09,0x09,0x09,0x01}, /* 'F' */
+    {0x3E,0x41,0x49,0x49,0x7A}, /* 'G' */
+    {0x7F,0x08,0x08,0x08,0x7F}, /* 'H' */
+    {0x00,0x41,0x7F,0x41,0x00}, /* 'I' */
+    {0x20,0x40,0x41,0x3F,0x01}, /* 'J' */
+    {0x7F,0x08,0x14,0x22,0x41}, /* 'K' */
+    {0x7F,0x40,0x40,0x40,0x40}, /* 'L' */
+    {0x7F,0x02,0x0C,0x02,0x7F}, /* 'M' */
+    {0x7F,0x04,0x08,0x10,0x7F}, /* 'N' */
+    {0x3E,0x41,0x41,0x41,0x3E}, /* 'O' */
+    {0x7F,0x09,0x09,0x09,0x06}, /* 'P' */
+    {0x3E,0x41,0x51,0x21,0x5E}, /* 'Q' */
+    {0x7F,0x09,0x19,0x29,0x46}, /* 'R' */
+    {0x46,0x49,0x49,0x49,0x31}, /* 'S' */
+    {0x01,0x01,0x7F,0x01,0x01}, /* 'T' */
+    {0x3F,0x40,0x40,0x40,0x3F}, /* 'U' */
+    {0x1F,0x20,0x40,0x20,0x1F}, /* 'V' */
+    {0x3F,0x40,0x38,0x40,0x3F}, /* 'W' */
+    {0x63,0x14,0x08,0x14,0x63}, /* 'X' */
+    {0x07,0x08,0x70,0x08,0x07}, /* 'Y' */
+    {0x61,0x51,0x49,0x45,0x43}, /* 'Z' */
+};
+
+/* 诊断状态：step 耗时指数滑动平均 + 1 秒窗口帧率 */
+static double g_diag_step_ema;
+static int g_diag_fps;
+static int g_diag_fps_frames;
+static double g_diag_fps_t0;
+
+static void diag_text(int x0, int y0, const char *s, uint32_t color)
+{
+    for (; *s; s++) {
+        char ch = *s;
+        if (ch < 32 || ch > 90) ch = ' ';
+        const unsigned char *g = font5x7[ch - 32];
+        for (int col = 0; col < 5; col++) {
+            unsigned char bits = g[col];
+            for (int row = 0; row < 7; row++) {
+                if (!(bits & (1u << row))) continue;
+                int x = x0 + col, y = y0 + row;
+                if (x >= 0 && x < SCREEN_W && y >= 0 && y < SCREEN_H)
+                    g_fb[y * SCREEN_W + x] = color;
+            }
+        }
+        x0 += 6;
+        if (x0 >= SCREEN_W) break;
+    }
+}
+
+/* 在画面左上角压一块暗底再写字，保证任何画面上都可读 */
+static void diag_overlay(void)
+{
+    if (!g_diag_on || !g_fb) return;
+
+    const int lines = 3;
+    const int box_h = lines * 9 + 3;
+    for (int y = 0; y < box_h && y < SCREEN_H; y++)
+        for (int x = 0; x < SCREEN_W; x++)
+            g_fb[y * SCREEN_W + x] =
+                0xff000000u | ((g_fb[y * SCREEN_W + x] >> 2) & 0x003f3f3fu);
+
+    char l1[40], l2[40], l3[40];
+    const char *st;
+#if CORE_JIT_PLATFORM
+    if (g_hermes_jit_alloc_failed) st = "JIT FAIL";
+    else if (!g_jit_on)            st = "JIT OFF";
+    else if (g_hermes_jit_compiled) st = "JIT ON";
+    else                            st = "JIT NONE";
+#else
+    st = "JIT NA";
+#endif
+    snprintf(l1, sizeof(l1), "%s C%llu F%llu", st,
+#if CORE_JIT_PLATFORM
+             g_hermes_jit_compiled, g_hermes_jit_failed
+#else
+             0ULL, 0ULL
+#endif
+    );
+    snprintf(l2, sizeof(l2), "STEP %.1fMS FPS %d", g_diag_step_ema, g_diag_fps);
+#if CORE_JIT_PLATFORM
+    snprintf(l3, sizeof(l3), "JITCODE %.0fMS %lluKB",
+             g_hermes_jit_compile_us / 1000.0, g_hermes_jit_code_bytes / 1024);
+#else
+    snprintf(l3, sizeof(l3), "AOT INTERPRETER");
+#endif
+
+    uint32_t color = 0xff40ff40u;
+    if (g_diag_step_ema > 16.7) color = 0xff40a0ffu;   /* 超预算：橙 */
+    if (g_diag_step_ema > 33.0) color = 0xff4040ffu;   /* 严重：红 */
+    diag_text(2, 2, l1, color);
+    diag_text(2, 11, l2, color);
+    diag_text(2, 20, l3, 0xffc0c0c0u);
+}
+
 static void present_frame(void)
 {
     jsi::Runtime &rt = *g_rt;
@@ -1013,6 +1199,7 @@ static void present_frame(void)
                     g_fb[i] = 0xff000000u | ((v & 0xffu) << 16) |
                               (v & 0xff00u) | ((v >> 16) & 0xffu);
                 }
+                diag_overlay();
                 if (video_cb) video_cb(g_fb, SCREEN_W, SCREEN_H, SCREEN_W * sizeof(uint32_t));
                 return;
             }
@@ -1037,6 +1224,7 @@ static void present_frame(void)
         js_exception("rgba", e);
     }
 
+    diag_overlay();
     if (video_cb) video_cb(g_fb, SCREEN_W, SCREEN_H, SCREEN_W * sizeof(uint32_t));
 }
 
@@ -1082,12 +1270,16 @@ EXPORT void retro_run(void)
         retro_reset();
     }
 
-    double tp0 = g_perf_on ? perf_now_ms() : 0.0;
+    /* step 耗时总是量一份给诊断层用（clock_gettime 开销可忽略） */
+    double tp0 = perf_now_ms();
     try {
         (*fn_step).call(*g_rt, jsi::Value(FRAME_MS));
     } catch (const jsi::JSError &e) {
         js_exception("step", e);
     }
+    double step_ms = perf_now_ms() - tp0;
+    g_diag_step_ema = g_diag_step_ema > 0
+        ? g_diag_step_ema * 0.9 + step_ms * 0.1 : step_ms;
 
     /* pxt 协程续体全是 promise，每帧抽干 microtask（与旧核心同语义） */
     {
@@ -1097,9 +1289,21 @@ EXPORT void retro_run(void)
         }
     }
 
-    double tp1 = g_perf_on ? perf_now_ms() : 0.0;
+    double tp1 = perf_now_ms();
     present_frame();
     double tp2 = g_perf_on ? perf_now_ms() : 0.0;
+
+    /* 1 秒窗口帧率 */
+    {
+        double nowt = tp2 ? tp2 : perf_now_ms();
+        if (g_diag_fps_t0 <= 0) g_diag_fps_t0 = nowt;
+        if (++g_diag_fps_frames >= 60 || nowt - g_diag_fps_t0 >= 1000.0) {
+            g_diag_fps = (int)(g_diag_fps_frames * 1000.0 /
+                               (nowt - g_diag_fps_t0 + 0.001));
+            g_diag_fps_frames = 0;
+            g_diag_fps_t0 = nowt;
+        }
+    }
 
     int frames = pull_audio(g_audio, AUDIO_HZ / 30);
     if (frames <= 0) {

@@ -237,6 +237,15 @@ static bool cb_environment(unsigned cmd, void *data)
             v->value = getenv("ARCADE_PERF") ? "enabled" : "disabled";
             return true;
         }
+        /* 屏幕诊断叠加层：ARCADE_DIAG=1 时打开（截图即可看 JIT 状态） */
+        if (!strcmp(v->key, "makecode_arcade_diag")) {
+            v->value = getenv("ARCADE_DIAG") ? "enabled" : "disabled";
+            return true;
+        }
+        if (!strcmp(v->key, "makecode_arcade_jit")) {
+            v->value = getenv("ARCADE_NO_JIT") ? "disabled" : "enabled";
+            return true;
+        }
         return false;
     }
     return false;

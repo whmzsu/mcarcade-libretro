@@ -22,11 +22,24 @@
 
 #define DEBUG_TYPE "jit"
 
-// [mcarcade patch] JIT 可执行内存分配失败标志。定义放这里（而不是宿主）：
+// [mcarcade patch] JIT 诊断统计。定义放这里（而不是宿主）：
 // jit_probe / bench_hermes 这类只链 hermes、不含 core.cpp 的目标也要能解析。
+//
+// 这些数字用来回答"JIT 到底干了什么"——只看 isEnabled() 会把"开启了但一个
+// 函数都没编译成功"误判成 active。宿主把这些值画到屏幕上/写进日志。
 extern "C" {
 int g_hermes_jit_alloc_failed = 0;
+/// 成功编译的函数数
+unsigned long long g_hermes_jit_compiled = 0;
+/// 编译失败（指令不支持等）而被永久拉黑的函数数
+unsigned long long g_hermes_jit_failed = 0;
+/// 累计编译耗时（微秒）——用来判断 JIT 编译本身是不是卡顿来源
+unsigned long long g_hermes_jit_compile_us = 0;
+/// 已编译代码占用字节数（接近上限会永久停用 JIT）
+unsigned long long g_hermes_jit_code_bytes = 0;
 }
+
+#include <chrono>
 
 namespace hermes {
 namespace vm {
@@ -199,8 +212,19 @@ class JITContext::Compiler {
 JITCompiledFunctionPtr JITContext::compileImpl(
     Runtime &runtime,
     CodeBlock *codeBlock) {
+  // [mcarcade patch] 统计编译耗时：如果 JIT 编译本身吃掉大量主线程时间，
+  // 表现就是"加载后持续卡顿"，光看帧率看不出来。
+  auto t0 = std::chrono::steady_clock::now();
   Compiler compiler(runtime, *this, codeBlock);
-  return compiler.compileCodeBlock();
+  auto res = compiler.compileCodeBlock();
+  g_hermes_jit_compile_us += (unsigned long long)
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now() - t0).count();
+  if (res)
+    g_hermes_jit_compiled++;
+  else
+    g_hermes_jit_failed++;
+  return res;
 }
 
 JITCompiledFunctionPtr JITContext::Compiler::compileCodeBlock() {
@@ -341,6 +365,8 @@ JITCompiledFunctionPtr JITContext::Compiler::compileCodeBlockImpl() {
     return nullptr;
   }
   codeBlock_->setJITCompiled(jit_fn);
+  // [mcarcade patch] 记录已用代码内存，便于诊断是否撞上 32MB 上限后静默停用。
+  g_hermes_jit_code_bytes = usedSize;
 
   if (jc_.perfJitDump_) {
     // Write the JIT dump for this function.
