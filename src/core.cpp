@@ -57,6 +57,26 @@ static const char *cache_dir_public(void);
 #define AUDIO_HZ 44100
 #define FRAME_MS (1000.0 / 60.0)
 
+/*
+ * JIT 可执行内存分配失败标志（Hermes vendored 补丁）：
+ * AsmJit 的 JitRuntime 分配 RWX 页失败时（例如被系统 W^X 策略拦截），
+ * 原版 hermes 会 hermes_fatal 直接把前端整个崩掉。补丁后改为置位这个
+ * 标志并回退解释器，这里在日志里报告真实状态。
+ * 定义放本文件：Windows 构建（HERMESVM_JIT=0）不编译 JIT 代码，但
+ * 符号仍要有定义可链。
+ */
+extern "C" {
+int g_hermes_jit_alloc_failed = 0;
+}
+
+/* 与 third_party/hermes/include/hermes/VM/JIT/Config.h 的启用条件保持一致 */
+#if defined(__aarch64__) || defined(_M_ARM64) || \
+    ((defined(__x86_64__) || defined(_M_X64)) && !defined(_WIN32))
+#define CORE_JIT_PLATFORM 1
+#else
+#define CORE_JIT_PLATFORM 0
+#endif
+
 using namespace std::string_literals;
 namespace jsi = facebook::jsi;
 
@@ -690,10 +710,53 @@ static int looks_like_png(const unsigned char *d, size_t n)
     return n >= 8 && memcmp(d, sig, 8) == 0;
 }
 
+static void compile_log(const char *msg, void *ud);
+
+/* retro_load_game 开始时刻，给编译器/启动各阶段的日志打时间戳 */
+static double g_load_t0 = 0;
+
 static void compile_log(const char *msg, void *ud)
 {
     (void)ud;
-    arc_log("%s", msg);
+    if (g_load_t0 > 0)
+        arc_log("[编译 %5.1fs] %s", (now_ms() - g_load_t0) / 1000.0, msg);
+    else
+        arc_log("%s", msg);
+}
+
+/*
+ * JIT 状态自检：定义一个热函数并调 40 次（exec 阈值默认 32），触发真实
+ * 的 JIT 编译路径，然后读分配失败标志。日志能区分三种状态：
+ *   - 平台编译期没开 JIT（Windows）
+ *   - 开了但运行时分配失败 → 已自动回退解释器（W^X / 内存限制）
+ *   - 真正 active
+ * 设备上排查"慢"问题时，这一行日志是关键证据。
+ */
+static void js_jit_selftest(void)
+{
+#if CORE_JIT_PLATFORM
+    if (!g_rt) return;
+    jsi::Runtime &rt = *g_rt;
+    double t0 = now_ms();
+    try {
+        rt.evaluateJavaScript(std::unique_ptr<jsi::Buffer>(buffer_from_string(
+            "var __jt=0;"
+            "function __jf(){var s=0;for(var i=0;i<20000;i++)s+=i*3;return s;}"
+            "for(var k=0;k<40;k++)__jt=__jf();__jt;")),
+            "jit_selftest.js");
+    } catch (const jsi::JSError &e) {
+        arc_log("JIT 自检 JS 异常: %s", e.getMessage().c_str());
+        return;
+    }
+    if (g_hermes_jit_alloc_failed)
+        arc_log("JIT: 可执行内存分配失败，已自动回退解释器"
+                "（可能被系统 W^X 策略拦截）");
+    else
+        arc_log("JIT: active（热函数已编译为本机代码，自检 %.0f ms）",
+                now_ms() - t0);
+#else
+    arc_log("JIT: 此平台编译期未启用（AOT 字节码 + 解释器）");
+#endif
 }
 
 EXPORT bool retro_load_game(const struct retro_game_info *game)
@@ -710,6 +773,7 @@ EXPORT bool retro_load_game(const struct retro_game_info *game)
     set_controller_info();
     read_options();
     set_input_descriptors();
+    g_load_t0 = now_ms();
     g_bitmask_supported = environ_cb &&
         environ_cb(RETRO_ENVIRONMENT_GET_INPUT_BITMASKS, NULL);
 
@@ -770,7 +834,8 @@ EXPORT bool retro_load_game(const struct retro_game_info *game)
         }
 
         if (!hit) {
-            arc_log("开始编译（首次约 5~6 秒）…");
+            arc_log("开始冷编译（PC 约 5~6 秒；掌机可能要 1~2 分钟，"
+                    "成功一次后走缓存秒开）…");
             int rc = compiler_build(cart.source, cart.source_len, &g_source, &js_len,
                                     compile_log, NULL, err, sizeof(err));
             if (rc != 0) {
@@ -803,24 +868,31 @@ EXPORT bool retro_load_game(const struct retro_game_info *game)
         arc_log("binary.js = %u bytes", (unsigned)game->size);
     }
 
+    double tphase = now_ms();
     if (!js_init()) {
         js_shutdown();
         free(g_source);
         g_source = NULL;
         return false;
     }
+    arc_log("JS 运行时就绪（%.0f ms）", now_ms() - tphase);
+    tphase = now_ms();
     if (!js_load_source()) {
         js_shutdown();
         free(g_source);
         g_source = NULL;
         return false;
     }
+    arc_log("binary.js 装入完成（%.0f ms）", now_ms() - tphase);
+    tphase = now_ms();
     if (!js_boot_impl(g_source)) {
         js_shutdown();
         free(g_source);
         g_source = NULL;
         return false;
     }
+    arc_log("game boot 完成（%.0f ms）", now_ms() - tphase);
+    js_jit_selftest();
     g_loaded = 1;
     arc_log("game booted: %s", g_cart_name[0] ? g_cart_name : "(stdin)");
     return true;

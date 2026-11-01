@@ -21,6 +21,12 @@
 #include <cstdio>
 #include <limits>
 
+// [mcarcade patch] 宿主侧定义（core.cpp）。分配失败时置 1 并返回 nullptr，
+// 由调用方（JitCompiler.cpp）优雅回退解释器，避免 hermes_fatal 直接崩前端。
+extern "C" {
+extern int g_hermes_jit_alloc_failed;
+}
+
 #if defined(HERMESVM_COMPRESSED_POINTERS) && !defined(HERMESVM_CONTIGUOUS_HEAP)
 #error JIT does not support non-contiguous heap with compressed pointers
 #endif
@@ -176,7 +182,10 @@ JITCompiledFunctionPtr Emitter::addToRuntime(asmjit::JitRuntime &jr) {
   if (err) {
     llvh::errs() << "AsmJit failed: " << asmjit::DebugUtils::errorAsString(err)
                  << "\n";
-    hermes::hermes_fatal("AsmJit failed");
+    // [mcarcade patch] 原版这里 hermes_fatal 会崩掉整个前端；改为置标志并
+    // 返回 nullptr，调用方回退解释器。
+    g_hermes_jit_alloc_failed = 1;
+    return nullptr;
   }
   return fn;
 }

@@ -22,6 +22,11 @@
 
 #define DEBUG_TYPE "jit"
 
+// [mcarcade patch] JIT 可执行内存分配失败标志（定义在宿主 core.cpp，见该文件注释）。
+extern "C" {
+extern int g_hermes_jit_alloc_failed;
+}
+
 namespace hermes {
 namespace vm {
 namespace HERMESVM_JIT_ARCH_NS {
@@ -326,7 +331,15 @@ JITCompiledFunctionPtr JITContext::Compiler::compileCodeBlockImpl() {
     return nullptr;
   }
 
-  codeBlock_->setJITCompiled(em_.addToRuntime(jc_.impl_->jr));
+  // [mcarcade patch] 分配可执行内存失败（如被系统 W^X 策略拦截）时优雅回退
+  // 解释器，而不是让 hermes_fatal 把整个前端崩掉。上游原版此处无条件
+  // setJITCompiled（内部遇 null 即 fatal）。
+  JITCompiledFunctionPtr jit_fn = em_.addToRuntime(jc_.impl_->jr);
+  if (LLVM_UNLIKELY(!jit_fn)) {
+    jc_.enabled_ = false;
+    return nullptr;
+  }
+  codeBlock_->setJITCompiled(jit_fn);
 
   if (jc_.perfJitDump_) {
     // Write the JIT dump for this function.
