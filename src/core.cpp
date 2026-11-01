@@ -76,8 +76,10 @@ static const char *cache_dir_public(void);
 extern "C" int g_hermes_jit_alloc_failed;
 extern "C" unsigned long long g_hermes_jit_compiled;
 extern "C" unsigned long long g_hermes_jit_failed;
+extern "C" unsigned long long g_hermes_jit_failed_unsupported;
 extern "C" unsigned long long g_hermes_jit_compile_us;
 extern "C" unsigned long long g_hermes_jit_code_bytes;
+extern "C" char g_hermes_jit_last_error[160];
 #endif
 
 using namespace std::string_literals;
@@ -770,6 +772,9 @@ static void jit_report(const char *tag)
         arc_log("JIT[%s]: 已编译 %llu 个函数，失败 %llu，编译共 %.0fms，代码 %lluKB",
                 tag, g_hermes_jit_compiled, g_hermes_jit_failed,
                 g_hermes_jit_compile_us / 1000.0, g_hermes_jit_code_bytes / 1024);
+    if (g_hermes_jit_failed > 0)
+        arc_log("JIT[%s]: 失败中 %llu 个是指令不支持；最后原因: %s",
+                tag, g_hermes_jit_failed_unsupported, g_hermes_jit_last_error);
 #else
     (void)tag;
     arc_log("JIT[%s]: 平台编译期未启用（AOT 字节码 + 解释器）", tag);
@@ -1164,6 +1169,14 @@ static void diag_overlay(void)
              0ULL, 0ULL
 #endif
     );
+#if CORE_JIT_PLATFORM
+    if (g_hermes_jit_failed > 0) {
+        char le[24];
+        snprintf(le, sizeof(le), "%s", g_hermes_jit_last_error);
+        /* 失败率高时把最后一条错误塞进第三行，一眼看到原因 */
+        snprintf(l3, sizeof(l3), "FAIL %.20s", le);
+    }
+#endif
     snprintf(l2, sizeof(l2), "STEP %.1f TOT %.1f FPS %d",
              g_diag_step_ema, g_diag_total_ema, g_diag_fps);
 #if CORE_JIT_PLATFORM

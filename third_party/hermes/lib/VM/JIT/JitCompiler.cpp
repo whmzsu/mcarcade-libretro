@@ -33,13 +33,18 @@ int g_hermes_jit_alloc_failed = 0;
 unsigned long long g_hermes_jit_compiled = 0;
 /// 编译失败（指令不支持等）而被永久拉黑的函数数
 unsigned long long g_hermes_jit_failed = 0;
+/// 其中"指令不支持"类失败的个数
+unsigned long long g_hermes_jit_failed_unsupported = 0;
 /// 累计编译耗时（微秒）——用来判断 JIT 编译本身是不是卡顿来源
 unsigned long long g_hermes_jit_compile_us = 0;
 /// 已编译代码占用字节数（接近上限会永久停用 JIT）
 unsigned long long g_hermes_jit_code_bytes = 0;
+/// 最后一条失败原因（供宿主日志/诊断层显示）
+char g_hermes_jit_last_error[160] = {0};
 }
 
 #include <chrono>
+#include <cstdio>
 
 namespace hermes {
 namespace vm {
@@ -294,6 +299,16 @@ JITCompiledFunctionPtr JITContext::Compiler::compileCodeBlock() {
 
     if (jc_.perfJitDump_)
       jc_.perfJitDump_->discardPendingCodeComments();
+
+    // [mcarcade patch] 记录失败原因：JIT 失效率高时（例如 pxt 代码全被
+    // "unsupported instruction" 拉黑），JIT 等于没开，必须能看到原因。
+    {
+      if (error_ == Error::UnsupportedInst)
+        g_hermes_jit_failed_unsupported++;
+      snprintf(g_hermes_jit_last_error, sizeof(g_hermes_jit_last_error),
+               "%s (%s)", errMsg, codeBlock_->getNameString().c_str());
+      llvh::errs() << "jit fail: " << g_hermes_jit_last_error << "\n";
+    }
 
     codeBlock_->setDontJIT(true);
     return nullptr;
