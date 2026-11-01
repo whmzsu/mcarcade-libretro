@@ -23,6 +23,11 @@ concurrency:
 env:
   PXTBUILD: ${{ github.workspace }}/.pxtbuild
 
+# 产物同时推一个孤儿分支（artifacts/<平台>），这样不依赖 GitHub API
+# 也能直接 git fetch 取 .so（有些网络里 Actions 产物下载走不通）。
+permissions:
+  contents: write
+
 jobs:
   # ---- 公共准备：node + pxtc 环境缓存（三个 job 都要用） ----------------
   linux-x64:
@@ -72,6 +77,11 @@ jobs:
             build/makecode_arcade_libretro.so
             dist/makecode_arcade_libretro.info
 
+      - name: 产物推到 artifacts/linux-x64 分支
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/ci-publish-artifact.sh linux-x64 build/makecode_arcade_libretro.so
+
   linux-aarch64:
     name: Linux aarch64（构建 + 自检，JIT）
     # GitHub 公共仓库免费提供 ARM 原生 runner，原生构建比交叉省一整套工具链；
@@ -116,6 +126,11 @@ jobs:
           path: |
             build/makecode_arcade_libretro.so
             dist/makecode_arcade_libretro.info
+
+      - name: 产物推到 artifacts/linux-aarch64 分支
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/ci-publish-artifact.sh linux-aarch64 build/makecode_arcade_libretro.so
 
   android-aarch64:
     name: Android arm64-v8a（NDK 交叉构建）
@@ -168,3 +183,8 @@ jobs:
           path: |
             build-android/makecode_arcade_libretro.so
             dist/makecode_arcade_libretro.info
+
+      - name: 产物推到 artifacts/android-arm64 分支
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/ci-publish-artifact.sh android-arm64 build-android/makecode_arcade_libretro.so
