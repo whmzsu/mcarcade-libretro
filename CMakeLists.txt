@@ -168,6 +168,30 @@ if(MSVC)
     # retro_load_game 的 png 编译路径在 RetroArch 是 1MB 线程栈里跑的，
     # 自检也用小栈逼近（链接器栈保留 16MB 给 tsc 的深递归）
     target_link_options(core_test PRIVATE /STACK:16777216)
+else()
+    # Linux/ELF：-z stack-size 设置主线程栈保留（tsc 深递归需要大栈）
+    target_link_options(core_test PRIVATE "-Wl,-z,stack-size=16777216")
+endif()
+
+# Hermes 运行时在 POSIX 上需要 pthread / dl
+find_package(Threads REQUIRED)
+target_link_libraries(makecode_arcade_libretro PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+target_link_libraries(core_test PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+
+# 编译期 JIT 平台探针：直接把 Hermes 内部 Config 的宏打出来，
+# CI 上据此断言「发布包必须带 JIT」的平台没带错。
+add_executable(jit_probe tools/jit_probe.cpp)
+target_include_directories(jit_probe PRIVATE
+    third_party/hermes/API
+    third_party/hermes/API/jsi
+    third_party/hermes/public
+    third_party/hermes/include
+    ${CMAKE_BINARY_DIR}/hermes_build/include
+    ${CMAKE_BINARY_DIR}/hermes_build/lib/config)
+target_link_libraries(jit_probe PRIVATE hermesvm_a)
+if(MSVC)
+    target_compile_options(jit_probe PRIVATE /EHsc /utf-8)
+    target_link_options(jit_probe PRIVATE /STACK:16777216)
 endif()
 
 # 一次性实验：验证 Hermes JIT 是否生效（tools/bench_hermes.cpp）

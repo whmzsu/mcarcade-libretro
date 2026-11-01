@@ -13,3 +13,5 @@ out/
 build-host/
 compile_core.log
 build.log
+.pxtbuild/
+smoke.log

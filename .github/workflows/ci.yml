@@ -1,0 +1,163 @@
+name: CI
+
+# 三个 job，对应核心的三个发布平台（Windows x64 本地 MSVC 构建，不占 CI）：
+#   linux-x64     ubuntu-latest          —— 构建 + 冒烟自检 + JIT 探针
+#   linux-aarch64 ubuntu-24.04-arm       —— 免费 ARM 原生 runner（手持机主战场，
+#                                           Hermes JIT 在 Linux aarch64 自动启用）
+#   android       ubuntu-latest + NDK    —— 交叉编 arm64-v8a 的 .so（只编库，不能跑）
+#
+# 两步构建（host hermesc → 主构建）统一走 scripts/ci-build.sh，理由见脚本头注释。
+# pxtc 环境（.pxtbuild）由 tools/setup_pxtc.js 准备并缓存——内嵌编译器载荷
+# 构建期要从 pxt-core/pxt-arcade 抽文件，缺了它 pxt_compiler_bundle.h 生成失败。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PXTBUILD: ${{ github.workspace }}/.pxtbuild
+
+jobs:
+  # ---- 公共准备：node + pxtc 环境缓存（三个 job 都要用） ----------------
+  linux-x64:
+    name: Linux x64（构建 + 自检）
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: 缓存 pxtc 环境
+        id: pxtcache
+        uses: actions/cache@v4
+        with:
+          path: .pxtbuild
+          # setup_pxtc.js 改动（锁版本升级）时缓存失效
+          key: pxtbuild-${{ hashFiles('tools/setup_pxtc.js') }}
+
+      - name: 准备 pxtc 环境
+        if: steps.pxtcache.outputs.cache-hit != 'true'
+        run: node tools/setup_pxtc.js
+
+      - name: vendored third_party 是否齐全
+        run: |
+          for d in hermes quickjs lzma libretro pxt-sim; do
+            test -d "third_party/$d" || { echo "缺少 third_party/$d"; exit 1; }
+          done
+          echo "third_party 齐全"
+
+      - name: 构建（host hermesc + 主构建）
+        run: bash scripts/ci-build.sh build
+
+      - name: JIT 平台探针
+        run: ./build/jit_probe
+
+      - name: 冒烟自检（ping.js / ping.png 全链路）
+        run: bash scripts/ci-smoke.sh ./build/core_test
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: makecode_arcade_libretro-linux-x64
+          path: |
+            build/makecode_arcade_libretro.so
+            dist/makecode_arcade_libretro.info
+
+  linux-aarch64:
+    name: Linux aarch64（构建 + 自检，JIT）
+    # GitHub 公共仓库免费提供 ARM 原生 runner，原生构建比交叉省一整套工具链；
+    # Hermes JIT 在 Linux aarch64 上自动启用（HERMESVM_ALLOW_JIT=1）
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: 缓存 pxtc 环境
+        id: pxtcache
+        uses: actions/cache@v4
+        with:
+          path: .pxtbuild
+          key: pxtbuild-arm64-${{ hashFiles('tools/setup_pxtc.js') }}
+
+      - name: 准备 pxtc 环境
+        if: steps.pxtcache.outputs.cache-hit != 'true'
+        run: node tools/setup_pxtc.js
+
+      - name: 构建（host hermesc + 主构建）
+        run: bash scripts/ci-build.sh build
+
+      - name: JIT 平台探针
+        run: |
+          ./build/jit_probe
+          # aarch64 Linux 是本项目 JIT 的目标平台，JIT 必须编进来
+          ./build/jit_probe | grep -q "HERMESVM_JIT=1" \
+            || { echo "aarch64 上 HERMESVM_JIT != 1，JIT 没编进来！"; exit 1; }
+
+      - name: 冒烟自检（ping.js / ping.png 全链路）
+        run: bash scripts/ci-smoke.sh ./build/core_test
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: makecode_arcade_libretro-linux-aarch64
+          path: |
+            build/makecode_arcade_libretro.so
+            dist/makecode_arcade_libretro.info
+
+  android-aarch64:
+    name: Android arm64-v8a（NDK 交叉构建）
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # 交叉构建没法在 host 跑自检，只编核心库
+      CI_TARGETS: makecode_arcade_libretro
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: 缓存 pxtc 环境
+        id: pxtcache
+        uses: actions/cache@v4
+        with:
+          path: .pxtbuild
+          key: pxtbuild-${{ hashFiles('tools/setup_pxtc.js') }}
+
+      - name: 准备 pxtc 环境
+        if: steps.pxtcache.outputs.cache-hit != 'true'
+        run: node tools/setup_pxtc.js
+
+      - name: 构建（host hermesc + NDK 交叉主构建）
+        run: |
+          NDK="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-}}"
+          test -n "$NDK" && test -d "$NDK" || { echo "找不到 NDK"; exit 1; }
+          echo "NDK = $NDK ($("$NDK"/ndk-build --version 2>/dev/null | head -1 || cat "$NDK/source.properties" | grep Revision))"
+          bash scripts/ci-build.sh build-android \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-24 \
+            -DANDROID_STL=c++_static \
+            -DHERMES_IS_ANDROID=ON
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: makecode_arcade_libretro-android-arm64
+          path: |
+            build-android/makecode_arcade_libretro.so
+            dist/makecode_arcade_libretro.info
