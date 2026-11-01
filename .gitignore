@@ -1,0 +1,15 @@
+build/
+.zig-cache/
+zig-out/
+out/
+*.o
+*.obj
+*.lib
+*.dll
+*.so
+*.dylib
+*.ppm
+*.png.tmp
+build-host/
+compile_core.log
+build.log
