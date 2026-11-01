@@ -71,7 +71,10 @@
 #include <jsi/instrumentation.h>
 #include <jsi/threadsafe.h>
 
-#ifdef __ANDROID__
+// [mcarcade patch] 上游把 fbjni 绑在 __ANDROID__ 上（假设 Android = React Native，
+// 编译期有 fbjni 头、运行期有 JVM）。libretro 核心跑在 RetroArch 里两者都没有，
+// 改为只在我们显式定义 HERMES_ENABLE_FBJNI 时才启用（本项目从不定义）。
+#if defined(__ANDROID__) && defined(HERMES_ENABLE_FBJNI)
 #include <fbjni/fbjni.h>
 #endif
 
@@ -259,7 +262,8 @@ using ScheduleCallbackFunc = std::function<void(EventLoopCallback)>;
 /// embedder did not configure one: a JNI ThreadScope wrapper on Android, and
 /// an empty runner, which leaves the thread unwrapped, everywhere else.
 vm::ThreadRunner makeDefaultFinalizerThreadRunner() {
-#ifdef __ANDROID__
+// [mcarcade patch] 同上：无 JVM 环境不包 ThreadScope（见 include 处的补丁说明）
+#if defined(__ANDROID__) && defined(HERMES_ENABLE_FBJNI)
   return [](std::function<void()> run) {
     // Finalizers may release JNI references, which requires the thread to be
     // attached to the JVM. ThreadScope's constructor throws when fbjni has no
