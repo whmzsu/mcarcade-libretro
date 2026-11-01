@@ -39,3 +39,17 @@ cmake --build "$BUILD" --target $TARGETS -j"$(nproc 2>/dev/null || sysctl -n hw.
 
 echo "=== 产物 ==="
 ls -lh "$BUILD"/makecode_arcade_libretro.* 2>/dev/null || true
+
+# ---- strip（可选）--------------------------------------------------------
+# 默认用 host 的 strip（native 构建适用）；交叉构建时外部传 STRIP_BIN 指向
+# 对应工具链的 llvm-strip。工具不存在就跳过，不影响产物可用性。
+SO="$BUILD/makecode_arcade_libretro.so"
+if [ -f "$SO" ]; then
+    STRIP_TOOL="${STRIP_BIN:-strip}"
+    if command -v "$STRIP_TOOL" >/dev/null 2>&1 || [ -x "$STRIP_TOOL" ]; then
+        "$STRIP_TOOL" --strip-unneeded "$SO"
+        echo "stripped: $(ls -lh "$SO" | awk '{print $5}')"
+    else
+        echo "strip 工具 $STRIP_TOOL 不可用，保留符号表"
+    fi
+fi
