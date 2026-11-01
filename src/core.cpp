@@ -57,24 +57,23 @@ static const char *cache_dir_public(void);
 #define AUDIO_HZ 44100
 #define FRAME_MS (1000.0 / 60.0)
 
-/*
- * JIT 可执行内存分配失败标志（Hermes vendored 补丁）：
- * AsmJit 的 JitRuntime 分配 RWX 页失败时（例如被系统 W^X 策略拦截），
- * 原版 hermes 会 hermes_fatal 直接把前端整个崩掉。补丁后改为置位这个
- * 标志并回退解释器，这里在日志里报告真实状态。
- * 定义放本文件：Windows 构建（HERMESVM_JIT=0）不编译 JIT 代码，但
- * 符号仍要有定义可链。
- */
-extern "C" {
-int g_hermes_jit_alloc_failed = 0;
-}
-
 /* 与 third_party/hermes/include/hermes/VM/JIT/Config.h 的启用条件保持一致 */
 #if defined(__aarch64__) || defined(_M_ARM64) || \
     ((defined(__x86_64__) || defined(_M_X64)) && !defined(_WIN32))
 #define CORE_JIT_PLATFORM 1
 #else
 #define CORE_JIT_PLATFORM 0
+#endif
+
+/*
+ * JIT 可执行内存分配失败标志（Hermes vendored 补丁，定义在
+ * third_party/hermes/lib/VM/JIT/JitCompiler.cpp）：
+ * AsmJit 的 JitRuntime 分配 RWX 页失败时（例如被系统 W^X 策略拦截），
+ * 原版 hermes 会 hermes_fatal 直接把前端整个崩掉。补丁后改为置位这个
+ * 标志并回退解释器，这里在日志里报告真实状态。
+ */
+#if CORE_JIT_PLATFORM
+extern "C" int g_hermes_jit_alloc_failed;
 #endif
 
 using namespace std::string_literals;

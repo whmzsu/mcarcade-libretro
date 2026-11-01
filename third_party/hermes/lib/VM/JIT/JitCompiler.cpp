@@ -22,9 +22,10 @@
 
 #define DEBUG_TYPE "jit"
 
-// [mcarcade patch] JIT 可执行内存分配失败标志（定义在宿主 core.cpp，见该文件注释）。
+// [mcarcade patch] JIT 可执行内存分配失败标志。定义放这里（而不是宿主）：
+// jit_probe / bench_hermes 这类只链 hermes、不含 core.cpp 的目标也要能解析。
 extern "C" {
-extern int g_hermes_jit_alloc_failed;
+int g_hermes_jit_alloc_failed = 0;
 }
 
 namespace hermes {

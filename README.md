@@ -72,11 +72,53 @@ ARCADE_FIXED_DT=16 ARCADE_PERF=1 ./core_test tests/data/ping.png out.ppm 300 --p
 # 第二次加载应看到：编译缓存命中 + bytecode cache hit
 ```
 
+## 掌机/Android 上的加载耗时（重要）
+
+`.png` 卡带里只有工程源码，进核心要跑一遍官方 tsc（内嵌的 QuickJS 编译器）才有
+`binary.js`。这段是**纯 CPU 单线程**工作，耗时随设备主频放大：
+
+| 阶段（Windows x64 实测） | 耗时 | RK3566 之类 A55 设备预估 |
+|---|---|---|
+| 编译器胶水 + target 载入 | 0.5s | 5~10s |
+| 依赖安装（pxt_modules） | 0.4s | 3~8s |
+| **tsc 执行** | **4.2s** | **40~90s** |
+| Hermes 装载 binary.js（无 HBC 缓存时） | 0.5s | 5~10s |
+
+所以首次加载一张源卡带，掌机上黑屏/卡头几帧 1~2 分钟属正常；期间前端界面是冻结的
+（RetroArch 主线程被 `retro_load_game` 占着）。**成功一次后就快了**：
+
+- 编译缓存存 `binary.js`，字节码缓存存 HBC，二次加载全链路约 0.2s（桌面）→ 设备上 2~5s；
+- 缓存目录来自前端给的 save dir，Android 上是 RetroArch 的应用私有目录，卸载/清数据会重新冷编译；
+- 嫌设备上太慢可以 PC 端预转换（不需要设备算力）：
+
+```bash
+node tools/setup_pxtc.js                    # 一次性准备 pxt 工具链
+node tools/cart_build.js 游戏.png -o out/   # 产出 out/游戏/binary.js
+# 把 binary.js 拷到设备，直接加载 .js（扩展名 js 已在 valid_extensions 里）
+```
+
+### 诊断日志（排查设备性能问题）
+
+启动时会打印阶段耗时和 JIT 真实状态，RetroArch 里把日志级别调到「信息」即可在
+`retroarch.log` 看到：
+
+```
+[arcade] [编译   5.0s] [编译器] tsc 完成，用时 4.2s      ← 冷编译各阶段
+[arcade] JS 运行时就绪（67 ms）                          ← Hermes runtime 创建
+[arcade] binary.js 装入完成（6 ms）                       ← HBC 缓存命中很快，冷编则数百 ms
+[arcade] JIT: active（热函数已编译为本机代码…）           ← 三种：active / 回退解释器 / 平台未启用
+```
+
+`JIT: 可执行内存分配失败，已自动回退解释器` 说明系统拦了 RWX 页（W^X 策略），
+此时仍能玩但只剩解释器速度；`ARCADE_NO_JIT=1` 可手动关 JIT 做对照。
+
 ## 已知边界
 
 - 存档状态不支持（与旧核心相同，JS 闭包无法序列化）。
 - 依赖 `github:` 扩展的卡带仍需 PC 端 `cart_build.js` 转换（内嵌编译器不联网）。
 - Hermes JIT 在个别平台不可用时自动退回纯解释（AOT 字节码收益仍在）。
+- 裸 PNG（不含内嵌工程，如 `tests/data/big.png` / `toneprobe.png`）不是可运行卡带，
+  只能做提取测试，两个核心都会报「卡带里没有 pxt.json」。
 
 ## 许可
 
