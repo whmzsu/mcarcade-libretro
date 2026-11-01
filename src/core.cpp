@@ -1110,6 +1110,7 @@ static const unsigned char font5x7[59][5] = {
 
 /* 诊断状态：step 耗时指数滑动平均 + 1 秒窗口帧率 */
 static double g_diag_step_ema;
+static double g_diag_total_ema;
 static int g_diag_fps;
 static int g_diag_fps_frames;
 static double g_diag_fps_t0;
@@ -1163,7 +1164,8 @@ static void diag_overlay(void)
              0ULL, 0ULL
 #endif
     );
-    snprintf(l2, sizeof(l2), "STEP %.1fMS FPS %d", g_diag_step_ema, g_diag_fps);
+    snprintf(l2, sizeof(l2), "STEP %.1f TOT %.1f FPS %d",
+             g_diag_step_ema, g_diag_total_ema, g_diag_fps);
 #if CORE_JIT_PLATFORM
     snprintf(l3, sizeof(l3), "JITCODE %.0fMS %lluKB",
              g_hermes_jit_compile_us / 1000.0, g_hermes_jit_code_bytes / 1024);
@@ -1293,18 +1295,20 @@ EXPORT void retro_run(void)
     present_frame();
     double tp2 = g_perf_on ? perf_now_ms() : 0.0;
 
-    /* 1 秒窗口帧率 */
+    /* 1 秒时间窗口帧率（不能用帧数当窗口：前端可能不限速） */
     {
         double nowt = tp2 ? tp2 : perf_now_ms();
         if (g_diag_fps_t0 <= 0) g_diag_fps_t0 = nowt;
-        if (++g_diag_fps_frames >= 60 || nowt - g_diag_fps_t0 >= 1000.0) {
-            g_diag_fps = (int)(g_diag_fps_frames * 1000.0 /
-                               (nowt - g_diag_fps_t0 + 0.001));
+        g_diag_fps_frames++;
+        double span = nowt - g_diag_fps_t0;
+        if (span >= 1000.0) {
+            g_diag_fps = (int)(g_diag_fps_frames * 1000.0 / span);
             g_diag_fps_frames = 0;
             g_diag_fps_t0 = nowt;
         }
     }
 
+    double ta0 = perf_now_ms();
     int frames = pull_audio(g_audio, AUDIO_HZ / 30);
     if (frames <= 0) {
         frames = AUDIO_HZ / 60;
@@ -1314,6 +1318,14 @@ EXPORT void retro_run(void)
     else if (audio_sample_cb)
         for (int i = 0; i < frames; i++)
             audio_sample_cb((uint16_t)g_audio[i * 2], (uint16_t)g_audio[i * 2 + 1]);
+
+    /* 总帧耗时（含 present + audio），overlay 用；和 step 对照能分辨瓶颈在 JS 还是周边 */
+    {
+        double tot = (perf_now_ms() - tp0);
+        g_diag_total_ema = g_diag_total_ema > 0
+            ? g_diag_total_ema * 0.9 + tot * 0.1 : tot;
+    }
+    (void)ta0;
 
     if (g_perf_on) {
         g_perf_step += tp1 - tp0;

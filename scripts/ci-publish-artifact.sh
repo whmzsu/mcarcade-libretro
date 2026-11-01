@@ -17,6 +17,12 @@ WORK=$(mktemp -d)
 
 cp "$SO" "$WORK/makecode_arcade_libretro.so"
 cp "$INFO" "$WORK/makecode_arcade_libretro.info"
+# 基准/自检数据（bench.txt 由 CI 步骤提前写到仓库根或 /tmp，存在就带上）：
+for extra in bench-result.txt smoke-result.txt; do
+    for cand in "$extra" "/tmp/$extra"; do
+        if [ -f "$cand" ]; then cp "$cand" "$WORK/$extra"; break; fi
+    done
+done
 {
     echo "commit: ${GITHUB_SHA:-local}"
     echo "run: ${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-}/actions/runs/${GITHUB_RUN_ID:-0}"
