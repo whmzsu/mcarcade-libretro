@@ -1,0 +1,4 @@
+commit: fc8dc036cfa7080d66e0635fc33fc85708b77bc7
+run: https://github.com/whmzsu/mcarcade-libretro/actions/runs/44854789592
+built: 2026-11-21T02:22:50Z
+size: 13189064 bytes
